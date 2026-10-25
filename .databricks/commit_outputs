@@ -1,3 +1,6 @@
 {
-  "Notebooks/01_ingest_bronze.ipynb": true
+  "notebooks/bronze_ingest.ipynb": true,
+  "notebooks/silver_transform.ipynb": true,
+  "notebooks/silver_profile.ipynb": true,
+  "notebooks/gold_build.ipynb": true
 }
