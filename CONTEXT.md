@@ -17,16 +17,16 @@
   - Free Edition limits: serverless compute only; cannot create SQL warehouses (use the pre-created **Serverless Starter Warehouse**); daily fair-usage quota; up to 3 Databricks Apps; outbound internet limited to trusted domains; inactive accounts may be deleted, so keep all code in GitHub.
 
 ## 2. Architecture & Key Decisions
-- **Medallion layers:** Bronze (raw, all strings) → Silver (PySpark: typed, deduplicated, flagged) → Gold (dbt marts) → Streamlit.
+- **Medallion layers:** Bronze (raw, all strings) → Silver (PySpark: typed, deduplicated, flagged) → Gold (Spark SQL star schema) → Streamlit.
 - **Unity Catalog:** catalog `workspace`; schemas `sme_risk_bronze`, `sme_risk_silver`, `sme_risk_gold` (created 2026-10-13). Bronze volume: **`source_systems`** (replaces the `landing` volume from testing).
-- **Load patterns:** Bronze = append each weekly snapshot (replaceWhere per `_snapshot_date`, idempotent); Silver = overwrite from latest snapshot; Gold = dbt (staging as views, marts as tables).
+- **Load patterns:** Bronze = append each weekly snapshot (replaceWhere per `_snapshot_date`, idempotent); Silver = overwrite from latest snapshot; Gold = overwrite from Silver (option A).
 - **Landing layout:** `/Volumes/workspace/sme_risk_bronze/source_systems/asic_companies/snapshot_date=YYYY-MM-DD/<file>` + `_metadata.json` (source URL, ASIC last-modified, bytes, SHA-256). `snapshot_date` = resource `last_modified` from the data.gov.au CKAN API (`package_show?id=asic-companies`). Download skips if the snapshot folder already has the file; writes via `.part` then rename.
 - **Bronze table:** `workspace.sme_risk_bronze.asic_companies_raw` — 15 source columns as STRING with snake_case names (`type`, `class` kept as-is; rename in Silver) + `_snapshot_date`, `_source_file`, `_source_url`, `_ingested_at`. CSV read with `sep="\t"`, `quote=""` (quoting off), `inferSchema=False`. Load stops unless: header matches the 15 documented names, row count = raw non-empty line count − 1, every line has exactly 14 tabs. Cell 7 loads only snapshot folders not yet in the table.
-- **Metadata:** table, column and volume comments sourced from the ASIC help file (Appendix Item 2), applied in `01_ingest_bronze` Cell 5b (each rerun adds ~19 CHANGE COLUMN versions; harmless). `CCIV` type appears in data but is not documented by ASIC.
+- **Metadata:** table, column and volume comments sourced from the ASIC help file (Appendix Item 2), applied in `bronze_ingest` (each rerun adds ~19 CHANGE COLUMN versions; harmless). `CCIV` type appears in data but is not documented by ASIC.
 - **Notebook conventions:** every cell safe to rerun → "Run All" is the normal way to run; all config (incl. `BRONZE_TABLE`) lives in Cell 1.
-- **Orchestration (later):** one Databricks Job, weekly (ingest → silver → dbt build); verify Jobs on Free Edition.
+- **Orchestration (DONE 2026-10-25):** Databricks Job `sme_risk_weekly_pipeline`: tasks `bronze_layer` → `silver_layer` → `gold_layer` (notebooks `notebooks/bronze_ingest`, `silver_transform`, `gold_build`; source WORKSPACE = the Git folder; serverless; Bronze 1 retry after 15 min; tag project=sme-lending-risk). Definition exported to `jobs/sme_risk_weekly_pipeline.yml`. First runs succeeded (~7 min). Still to add: weekly schedule Wed 07:00 Australia/Sydney + failure email, then re-export YAML. Free Edition limit: 5 concurrent job tasks.
 - **Why not upsert:** Bronze appends snapshots (upsert would overwrite status history); Silver overwrites from the latest snapshot (full-copy source; overwrite removes companies ASIC drops after a year). Upsert-style SCD2 only later in Gold via dbt snapshots.
-- **Silver notebook structure (`02_transform_silver.ipynb`):** 1) imports → 2) config + `RENAME_MAP` + code-label dictionaries → 3) read Bronze → 4) filter latest snapshot (+ baseline counts) → 5) rename → per-column transforms (PySpark) → temp view `v_companies_clean` → dedup + business rules (SQL) → labels (PySpark) → validate (hard stops) → write (overwrite).
+- **Silver notebook structure (`notebooks/silver_transform.ipynb`):** 1) imports → 2) config + `RENAME_MAP` + code-label dictionaries → 3) read Bronze → 4) filter latest snapshot (+ baseline counts) → 5) rename → per-column transforms (PySpark) → temp view `v_companies_clean` → dedup + business rules (SQL) → labels (PySpark) → validate (hard stops) → write (overwrite).
 - **RENAME_MAP (user-edited, no `_raw` suffixes):** type→company_type, class→company_class, sub_class→company_sub_class, status→status_code, date_of_registration→registration_date, date_of_deregistration→deregistration_date, previous_state_of_registration→previous_state; others keep their names. Date flags (`*_unparseable`) must be computed **before** parsing in place; text `deregistration_date` dropped and rebuilt in SQL as status-authoritative, raw parse kept as `deregistration_date_reported`.
 - **Column decisions so far (detail in README §3.3):**
   - `company_name`: decode CSV escaping first (429 rows; verified on ASIC register), then strip control chars, trim (45,798), collapse spaces (46,776). Keep asterisks (genuine), numbers, case, punctuation. `º` (suspected export replacement of `|`) flagged via `company_name_has_export_artifact`, not changed — pending pipe check. New feature `is_acn_named` (own ACN appears anywhere in the name's digits; catches ABN-style names). Helpers `unescape_csv`, `clean_text` also applied to `current_name`.
@@ -42,7 +42,7 @@
   - `modified_since_last_report`: Y → true, null → false via coalesce (plain `== 'Y'` gives null — bug fixed). Pipeline use only.
   - `abn`: `"0"` (1,631,164, 41%) → null; `has_abn`; all real ABNs valid + unique → hard stops (11 digits, mod-89 check, unique); `abn_format_valid` dropped. 266 ABNs not built from ACN (charities, foreign, converted entities) — genuine, no flag. ABN % by status: REGD 58.5, DRGD 69.0, SOFF 68.6, EXAD 86.4 → not a headline distress signal; PSTC 9.3% vs PROP 66.2% → "trading vs dormant" indicator, analyse within segment.
   - Former-name rows (indicator null) are not edited; dedup keeps the Y row per ACN. ACNs with no Y row are dropped (were 39, all CNCL) — check none are in the lending population.
-- **Gold model (DECIDED 2026-10-24, replaces dbt plan):** star schema in notebook **`Notebooks/gold_build.ipynb`**; each table = one `spark.sql` query → DataFrame → `saveAsTable` in `workspace.sme_risk_gold` → `%sql` sanity checks. No marts, no dbt for now (KPIs queried on top).
+- **Gold model (DECIDED 2026-10-24, replaces dbt plan):** star schema in notebook **`notebooks/gold_build.ipynb`**; each table = one `spark.sql` query → DataFrame → `saveAsTable` in `workspace.sme_risk_gold` → `%sql` sanity checks. No marts, no dbt for now (KPIs queried on top).
   - Keys: `company_key = CAST(acn AS BIGINT)` (user rejected negative xxhash64); `classification_key = type-class-sub_class`; `status_key = status_code`; `age_band_key` 0–7 (0 Unknown; rule: age<5 → age+1, <10 → 6, else 7); `date_key = YYYYMMDD` int, 0 = "No date".
   - Dims (all ✅ 2026-10-24): dim_company 4,016,332 · dim_company_classification 35 rows / 8 borrower segments (Trading 3,483,992 · Super trustee 488,022 · Not-for-profit 23,132 · Other public 11,766 · Foreign 4,695 · Home unit 2,636 · Registrable body 2,078 · CCIV 11; ULSS/LISS left in Other public) · dim_status 6 (+ status_group) · dim_age_band 8 (built from ages 0–10 via CASE + DISTINCT) · dim_date 76,702 (1817-01-01 → 2026-12-31 + No-date row; AU financial year columns).
   - **Load pattern (DECIDED 2026-10-24, option A):** every Gold table (dims AND facts) is **overwritten from Silver** each run — Gold mirrors the latest snapshot; no MERGE. History lives only in Bronze (all weekly snapshots) and can be rebuilt from there later. Fact write cells: plain overwrite + overwriteSchema (replaceWhere removed).
@@ -84,27 +84,32 @@
 - [x] KPI spec v1 finalised (2026-10-10): exposure denominator, age bands, distress denominator, age-adjusted RRI, reliability flag, caveats.
 - [x] GitHub repo created; CONTEXT.md set up; repo connected to Databricks as a Git folder.
 - [x] Unity Catalog structure created (2026-10-13): 3 schemas + volume `sme_risk_bronze.source_systems`.
-- [x] **Bronze layer complete (2026-10-13)** — `notebooks/01_ingest_bronze`:
+- [x] **Bronze layer complete (2026-10-13)** — `notebooks/bronze_ingest` (was 01_ingest_bronze):
   - First snapshot `2026-10-12`: **4,450,307 rows · 4,016,371 distinct ACNs** (vs 8 Oct profiling: +1,258 rows, +1,337 ACNs — newer weekly file)
   - All checks passed (header, raw line count, 14 tabs per line); descriptions visible in Catalog Explorer
 - [x] Silver profiling + decisions done for `company_name`, `acn`, `company_type` (2026-10-13); README §3.2 data dictionary, §3.3 profiling notes, §4.1 UC structure, DQ log and decisions log updated.
 
 ## 4. Current State (WIP)
-- **Active Task:** Phase 4 – Gold star schema built (5 dims + 2 facts, all checks passed 2026-10-24). Now: first KPI results + investigating the age 2–3 deregistration spike.
-  - **First result (all companies, annual deregistration probability q by age):** 0–1 0.81% · 1–2 2.78% · **2–3 13.93%** · 3–4 7.90% · 4–5 7.13% · 5–10 6.24% · 10+ 4.64%. Implied S(2) ≈ 96.4%, S(5) ≈ 71%. Low first-year rate likely reflects deregistration lag (unverified). Age 2–3 peak cause unverified — check link to May 2026 spike / registration cohort.
-  - Open KPI question: RRI defined on 1 − S(2) misses the age 2–3 peak → consider S(3) or S(5).
-  - **Silver DONE (2026-10-13):** `workspace.sme_risk_silver.companies` = 4,016,332 rows from snapshot 2026-10-12 (4,016,371 ACNs − 39 without a current-name row, all CNCL); 19/19 hard stops passed.
-  - Notebooks: `silver_transform.ipynb` (was 02_transform_silver) = pipeline only (setup, read, rename, clean, parse, SQL dedup, labels, validation, write, comments). `silver_profile.ipynb` (was 02a_profile_silver) = all column profiling cells with outputs (evidence for README §3.3); not part of the job.
-  - Working rule agreed with user: **discuss findings first, ask before giving transformation code**; profiling/inspection code can be given directly.
-  - **Bug found 2026-10-25:** `company_name_has_export_artifact` checked `°` (U+00B0) but data has `º` (U+00BA) → always false. Fix in silver_transform cell 8: `rlike('[\u00BA\u00B0]')`; expect 1 current-name company (PILOTPATH, ACN 696299475).
-  - Pending small items: `º`→`|` pipe check; spot-check one APTY+LMSG company on ASIC; add hard-stop checks (ACN format/check digit, unknown type codes, no in-population ACN without a Y row) to the validation cell.
-- **Repo state (2026-10-25):** notebooks committed from Databricks as `Notebooks/bronze_ingest`, `silver_transform`, `silver_profile`, `gold_build` (commit d0a2aa0, pulled locally). README.md + CONTEXT.md still uncommitted locally. Notebook outputs NOT in Git: `.databricks/commit_outputs` still lists old path `Notebooks/01_ingest_bronze.ipynb`. Output commits for notebooks: admin setting changed, but `File → Commit notebook outputs` not visible yet (unresolved; fallback = screenshots in `docs/screenshots/`).
-- **Notebook state:** `02_transform_silver.ipynb` in progress (draft cells 1–11 given; Cells 6–7 updated for the no-`_raw` RENAME_MAP; `company_name` transform cell added after the rename cell).
+- **Active Task:** Phase 5 – Analysis in `notebooks/gold_analysis.ipynb` (not in the job), **one business question at a time**:
+  1. Q1 survival to years 1, 2, 5 (all companies vs Trading) + checks on the age 2–3 peak ← **in progress (queries given 2026-10-25)**
+  2. Q2 which borrower segments deregister earliest (needs RRI horizon decision: S(2) vs S(3)/S(5))
+  3. Q3 within Trading: ABN held, name change, ACN-named
+  4. Q4 distress share (SOFF + EXAD) by segment × age
+  5. Q5 is early-stage risk changing over time (limited: one year of deregistrations; weekly snapshots build history in Bronze)
+  6. Q6 recommendations (tighten / relax criteria)
+- **First result (12 Oct snapshot, all companies, annual deregistration probability q by age):** 0–1 0.81% · 1–2 2.78% · **2–3 13.93%** · 3–4 7.90% · 4–5 7.13% · 5–10 6.24% · 10+ 4.64%. Implied S(2) ≈ 96.4%, S(5) ≈ 71%. Low first-year rate likely reflects deregistration lag (unverified). Age 2–3 peak cause unverified.
+- **Data now:** Bronze holds snapshots 2026-10-12 and **2026-10-19** (4,452,194 rows · 4,018,291 ACNs); Silver/Gold rebuilt from 2026-10-19 (≈4,018,252 companies; 212,050 DRGD; May 2026 deregistrations 38,698). README §3 figures stay labelled as the 2026-10-12 baseline.
+- **Notebooks (`notebooks/`, lowercase since 2026-10-25):** pipeline = `bronze_ingest`, `silver_transform`, `gold_build` (has hard-stop cell + table/column comments); analysis only = `silver_profile` (reordered: raw profiling → cleaning → after-cleaning check), `gold_analysis` (new).
+- **Fixed 2026-10-25:** `company_name_has_export_artifact` searched `°` (U+00B0) but the file has `º` (U+00BA) → now `rlike('[\u00BA\u00B0]')`; expect 1 current company (PILOTPATH, ACN 696299475).
+- **Working rules:** discuss findings first, ask before giving transformation code (profiling/inspection code can be given directly). Pull before working on either side (Mac or Databricks), push when done.
+- **Repo state (2026-10-25):** GitHub has `notebooks/` + `jobs/sme_risk_weekly_pipeline.yml` + `.databricks/commit_outputs` (lowercase paths, all 4 notebooks). **Notebook outputs still not appearing on GitHub** even after Run all + commit with the admin setting on — unresolved, parked by user. User's Mac copy is out of date (old `Notebooks/` folder) — sync later: `git checkout -- .databricks/commit_outputs && rm -rf Notebooks && git pull`.
 - **Open Questions / Blockers:**
-  - ABS context data: needed or not? (optional; retry later)
-  - Reliability thresholds (100 company-years / 10 deregistrations) to review after the first Gold run
-  - RAG / vector search idea parked for a later project
+  - Notebook outputs not committed to GitHub (parked)
+  - Reliability thresholds (100 company-years / 10 deregistrations) to review in Q2
+  - RRI horizon S(2) vs S(3)/S(5)
+  - ABS context data (optional); RAG / vector search idea parked
 
 ## 5. Next Immediate Step
-1. Split the notebook (clone → keep pipeline cells in 02, profiling cells in 02a), commit both from Databricks, `git pull` locally, commit README.md + CONTEXT.md.
-2. Phase 4 – Gold built. Next: run the age 2–3 spike diagnostics, decide RRI horizon (S(2) vs S(3)/S(5)), then segment-level KPI queries → Streamlit app.
+1. Run Q1 cells A (survival table), B (age 2–3 by deregistration month), C (age 2–3 by registration month) in `gold_analysis`; interpret; write Q1 answer into README §7.
+2. Add job schedule (Wed 07:00 Sydney) + failure email; re-export YAML to `jobs/`.
+3. Then Q2 (segments) after deciding the RRI horizon.

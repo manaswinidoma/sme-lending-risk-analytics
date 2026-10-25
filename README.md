@@ -269,27 +269,22 @@ catalog: workspace
 
 **Load patterns:** Bronze = add each weekly snapshot (`replaceWhere` on `_snapshot_date`, idempotent) · Silver = overwrite from the latest snapshot (source is a full copy; also removes companies ASIC drops) · Gold = every table rebuilt from Silver (overwrite); Gold reflects the latest snapshot. **History is kept only in Bronze** (all weekly snapshots).
 
-### 4.2 Repository structure [TODO – update as built]
+### 4.2 Repository structure
 
 ```
 ├── README.md                # this file
 ├── CONTEXT.md               # working memory between sessions
-├── Notebooks/
-│   ├── bronze_ingest.ipynb      # download + Bronze load (pipeline)
-│   ├── silver_transform.ipynb   # Silver pipeline (pipeline)
-│   ├── silver_profile.ipynb     # Silver column profiling – evidence only, not in the job
-│   └── gold_build.ipynb         # Gold star schema: 5 dims + 2 facts (pipeline)
-├── dbt/
-│   ├── models/
-│   │   ├── staging/
-│   │   ├── intermediate/
-│   │   └── marts/
-│   └── tests/
-├── app/                     # Streamlit
-├── docs/
-│   ├── screenshots/
-│   └── data_quality_log.md
-└── requirements.txt
+├── .databricks/
+│   └── commit_outputs           # tells Databricks which notebooks keep their outputs in Git
+├── jobs/
+│   └── sme_risk_weekly_pipeline.yml  # Databricks Job definition (exported YAML)
+├── notebooks/
+│   ├── bronze_ingest.ipynb      # pipeline: download + Bronze load
+│   ├── silver_transform.ipynb   # pipeline: clean, deduplicate, validate, write Silver
+│   ├── gold_build.ipynb         # pipeline: Gold star schema (5 dims + 2 facts) + hard stops + comments
+│   ├── silver_profile.ipynb     # analysis only: raw column profiling (evidence for §3.3)
+│   └── gold_analysis.ipynb      # analysis only: business questions on Gold (in progress)
+└── app/                         # Streamlit (planned)
 ```
 
 ---
@@ -377,8 +372,9 @@ Non-overlapping, contiguous bands on completed years since registration: `[0,1)`
 | 3. Silver | Cleaning, typing, deduplication (PySpark) | ✅ | 2026-10-13 | `workspace.sme_risk_silver.companies` written: 4,016,332 rows (snapshot 2026-10-12); all 19 hard stops passed. Profiling kept in `silver_profile.ipynb` |
 | 3. Silver | Data quality checks logged | ⬜ | | |
 | 4. Gold | Star schema: 5 dimensions + 2 facts (Spark SQL) | ✅ | 2026-10-24 | `gold_build.ipynb`; every key links, totals tie back to Silver |
-| 4. Gold | First KPI results | 🟡 | 2026-10-24 | Annual deregistration probability by age; age 2–3 peak under investigation |
-| 5. Analysis | Cohort and survival analysis | ⬜ | | |
+| 4. Gold | First KPI results | ✅ | 2026-10-24 | Annual deregistration probability by age |
+| 4. Pipeline | Databricks Job `sme_risk_weekly_pipeline` (Bronze → Silver → Gold) | ✅ | 2026-10-25 | Serverless, 1 retry on Bronze; first runs succeeded (~7 min: Bronze 1m40s, Silver 2m32s, Gold 3m4s). Definition in `jobs/`. Schedule (Wed 07:00 Sydney) + failure email to add |
+| 5. Analysis | Cohort and survival analysis | 🟡 | 2026-10-25 | `gold_analysis.ipynb`: Q1 survival to years 1–5 + age 2–3 peak checks |
 | 5. Analysis | Segment risk analysis | ⬜ | | |
 | 6. App | Streamlit pages built | ⬜ | | |
 | 6. App | App deployed | ⬜ | | |
@@ -506,3 +502,4 @@ Status key: ⬜ Not started · 🟡 In progress · ✅ Done · ⛔ Blocked
 | 2026-10-13 | Silver notes for status_code, dates, previous_state, state_registration_number, modified_since_last_report, abn; all columns profiled |
 | 2026-10-13 | Silver complete (4,016,332 rows, 19/19 hard stops); profiling split into its own notebook |
 | 2026-10-24 | Gold star schema built (5 dims, 2 facts); first survival result by age band |
+| 2026-10-25 | Notebooks renamed (`notebooks/` lowercase); Silver º flag bug fixed; profiling notebook reordered; weekly Databricks Job created and run successfully; job YAML in `jobs/` |
