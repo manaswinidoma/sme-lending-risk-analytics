@@ -2,6 +2,13 @@ resources:
   jobs:
     sme_risk_weekly_pipeline:
       name: sme_risk_weekly_pipeline
+      email_notifications:
+        on_failure:
+          - domamanaswini@gmail.com
+      schedule:
+        quartz_cron_expression: 0 0 7 ? * Wed
+        timezone_id: Australia/Sydney
+        pause_status: UNPAUSED
       tasks:
         - task_key: bronze_layer
           notebook_task:
