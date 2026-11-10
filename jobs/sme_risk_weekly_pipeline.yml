@@ -29,6 +29,12 @@ resources:
           notebook_task:
             notebook_path: /Workspace/Users/domamanaswini@gmail.com/sme-lending-risk-analytics/notebooks/gold_build
             source: WORKSPACE
+        - task_key: reports_layer
+          depends_on:
+            - task_key: gold_layer
+          notebook_task:
+            notebook_path: /Workspace/Users/domamanaswini@gmail.com/sme-lending-risk-analytics/notebooks/gold_reports/report_table
+            source: WORKSPACE
       tags:
         project: sme-lending-risk
       queue:
