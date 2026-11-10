@@ -1,6 +1,6 @@
 import streamlit as st
 
-from data import load_report
+from data import DATA_SOURCE, load_report
 from ui import inject_css, side_item, side_note
 
 st.set_page_config(
@@ -32,7 +32,10 @@ side_note("Which new Australian businesses are riskiest to lend to?")
 side_item("Data", "ASIC company register<br>(data.gov.au, public)")
 side_item("Snapshot", f"{snapshot:%d %b %Y}")
 side_item("Deregistrations counted", f"{window_start:%d %b %Y} – {snapshot:%d %b %Y}")
-side_item("Refreshed", "Weekly · Wednesday 7am (Sydney)")
+if DATA_SOURCE == "databricks":
+    side_item("Refreshed", "Weekly · Wednesday 7am (Sydney)")
+else:
+    side_item("Version", "Public copy: fixed snapshot<br>(live version refreshes weekly)")
 
 st.sidebar.divider()
 st.sidebar.markdown("**How to read this**")

@@ -12,6 +12,16 @@ import streamlit as st
 GOLD_SCHEMA = "workspace.sme_risk_gold"
 DATA_DIR = Path(__file__).parent / "data"
 DATA_SOURCE = os.getenv("DATA_SOURCE", "files")
+# the 4M-row lookup is exported as several Parquet parts (each under GitHub's 100 MB limit)
+LOOKUP_FILES = (DATA_DIR / "rpt_company_lookup" / "*.parquet").as_posix()
+
+
+@st.cache_resource
+def _duck():
+    """DuckDB queries the Parquet files directly, so the 4M rows are never loaded into memory."""
+    import duckdb
+
+    return duckdb.connect()
 
 
 @st.cache_resource
@@ -59,8 +69,9 @@ def lookup_company(acn: str) -> pd.DataFrame:
             f"SELECT * FROM {GOLD_SCHEMA}.rpt_company_lookup WHERE acn = :acn",
             {"acn": acn},
         )
-    df = pd.read_parquet(DATA_DIR / "rpt_company_lookup.parquet", filters=[("acn", "==", acn)])
-    return df
+    return _duck().execute(
+        f"SELECT * FROM read_parquet('{LOOKUP_FILES}') WHERE acn = ?", [acn]
+    ).df()
 
 
 @st.cache_data(ttl=3600, show_spinner="Loading data...")
@@ -89,7 +100,10 @@ def search_companies(name: str, limit: int = 25) -> pd.DataFrame:
                 LIMIT {int(limit)}""",
             {"name": name},
         )
-    df = pd.read_parquet(DATA_DIR / "rpt_company_lookup.parquet",
-                         columns=["acn", "company_name", "status_label", "borrower_segment", "lending_tier"])
-    hits = df[df["company_name"].str.contains(name, case=False, regex=False, na=False)]
-    return hits.sort_values(["company_name"]).head(limit)
+    return _duck().execute(
+        f"""SELECT {cols} FROM read_parquet('{LOOKUP_FILES}')
+            WHERE company_name ILIKE '%' || ? || '%'
+            ORDER BY status_label = 'Deregistered', company_name
+            LIMIT {int(limit)}""",
+        [name],
+    ).df()
