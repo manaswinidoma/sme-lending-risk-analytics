@@ -1,0 +1,6 @@
+command: ['streamlit', 'run', 'app.py']
+env:
+  - name: DATA_SOURCE
+    value: databricks
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
